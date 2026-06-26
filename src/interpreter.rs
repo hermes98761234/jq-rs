@@ -200,7 +200,15 @@ impl Interpreter {
                 let mut acc = init_val;
                 for item in items {
                     ctx.push_var(var, item);
-                    acc = self.eval_to_single(update, input, ctx)?;
+                    // Evaluate update with the current accumulator as input
+                    let results = self.run(update, &acc, ctx)?;
+                    acc = if results.len() == 1 {
+                        results[0].clone()
+                    } else if results.is_empty() {
+                        JqValue::Null
+                    } else {
+                        results[0].clone()
+                    };
                     // pop var
                     if let Some(pos) = ctx.vars.iter().rposition(|(n, _)| n == var) {
                         ctx.vars.remove(pos);
@@ -600,7 +608,10 @@ impl Interpreter {
                     _ => return Err(InterpreterError::new("join requires string separator")),
                 };
                 let items = input.iterate();
-                let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+                let parts: Vec<String> = items.iter().map(|v| match v {
+                    JqValue::String(s) => s.clone(),
+                    other => other.to_string(),
+                }).collect();
                 Ok(vec![JqValue::String(parts.join(&sep_str))])
             }
             "flatten" => {

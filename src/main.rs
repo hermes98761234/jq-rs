@@ -137,17 +137,11 @@ fn main() -> anyhow::Result<()> {
     let mut stdout_lock = stdout.lock();
     for (i, output) in outputs.iter().enumerate() {
         if i > 0 && !compact {
-            // Newline between JSON output objects
             writeln!(stdout_lock)?;
         }
         write!(stdout_lock, "{}", output)?;
-        if !output.ends_with('\n') && !raw_output {
+        if !raw_output && !output.ends_with('\n') {
             writeln!(stdout_lock)?;
-        }
-    }
-    if raw_output {
-        for output in &outputs {
-            write!(stdout_lock, "{}", output)?;
         }
     }
 

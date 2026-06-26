@@ -237,17 +237,32 @@ impl Parser {
                     }
                     let ch = self.char_at(self.pos);
                     if ch == '[' {
-                        // .[expr]
+                        // .[expr] or .[]
                         self.pos += 1;
-                        let idx = self.parse_pipe()?;
-                        self.expect(']')?;
-                        expr = Expr::IndexAccess(Box::new(idx));
+                        if self.pos < self.input.len() && self.char_at(self.pos) == ']' {
+                            self.pos += 1;
+                            expr = Expr::Iterate;
+                        } else {
+                            let idx = self.parse_pipe()?;
+                            self.expect(']')?;
+                            let next = Expr::IndexAccess(Box::new(idx));
+                            expr = if expr == Expr::Identity {
+                                next
+                            } else {
+                                Expr::Pipe(Box::new(expr), Box::new(next))
+                            };
+                        }
                     } else if ch == '(' {
                         // skip, handled elsewhere
                         break;
                     } else if is_ident_start(ch) {
                         let name = self.parse_ident()?;
-                        expr = Expr::FieldAccess(name);
+                        let next = Expr::FieldAccess(name);
+                        expr = if expr == Expr::Identity {
+                            next
+                        } else {
+                            Expr::Pipe(Box::new(expr), Box::new(next))
+                        };
                     } else if ch == '.' {
                         // .. is identity of identity = identity
                         expr = Expr::Identity;
@@ -261,11 +276,21 @@ impl Parser {
                     self.skip_whitespace();
                     if self.pos < self.input.len() && self.char_at(self.pos) == ']' {
                         self.pos += 1;
-                        expr = Expr::Iterate;
+                        let next = Expr::Iterate;
+                        expr = if expr == Expr::Identity {
+                            next
+                        } else {
+                            Expr::Pipe(Box::new(expr), Box::new(next))
+                        };
                     } else {
                         let idx = self.parse_pipe()?;
                         self.expect(']')?;
-                        expr = Expr::IndexAccess(Box::new(idx));
+                        let next = Expr::IndexAccess(Box::new(idx));
+                        expr = if expr == Expr::Identity {
+                            next
+                        } else {
+                            Expr::Pipe(Box::new(expr), Box::new(next))
+                        };
                     }
                 }
                 '(' => {
@@ -319,6 +344,11 @@ impl Parser {
                 let next = self.char_at(self.pos);
                 if next == '[' {
                     self.pos += 1;
+                    // Handle .[] (empty brackets = iterate)
+                    if self.pos < self.input.len() && self.char_at(self.pos) == ']' {
+                        self.pos += 1;
+                        return Ok(Expr::Iterate);
+                    }
                     let idx = self.parse_pipe()?;
                     self.expect(']')?;
                     Ok(Expr::IndexAccess(Box::new(idx)))
@@ -406,7 +436,13 @@ impl Parser {
                         let expr = self.parse_pipe()?;
                         self.skip_whitespace();
                         self.expect_word("as")?;
+                        self.skip_whitespace();
+                        // Variable name: skip leading $ if present
+                        if self.pos < self.input.len() && self.char_at(self.pos) == '$' {
+                            self.pos += 1;
+                        }
                         let var = self.parse_ident()?;
+                        self.skip_whitespace();
                         self.expect('(')?;
                         let init = self.parse_pipe()?;
                         self.expect(';')?;
@@ -493,17 +529,31 @@ impl Parser {
         Ok(Expr::ArrayLiteral(elements))
     }
 
+    fn parse_object_key_expr(&mut self) -> Result<Expr, ParseError> {
+        self.skip_whitespace();
+        let ch = self.char_at(self.pos);
+        if ch == '"' || ch == '\'' {
+            let s = self.parse_string()?;
+            Ok(Expr::Literal(JqValue::String(s)))
+        } else if is_ident_start(ch) {
+            let name = self.parse_ident()?;
+            Ok(Expr::Literal(JqValue::String(name)))
+        } else {
+            self.parse_pipe()
+        }
+    }
+
     fn parse_object_literal(&mut self) -> Result<Expr, ParseError> {
         self.pos += 1; // skip {
         self.skip_whitespace();
         let mut pairs = Vec::new();
         if self.pos < self.input.len() && self.char_at(self.pos) != '}' {
-            let key = self.parse_pipe()?;
+            let key = self.parse_object_key_expr()?;
             self.expect(':')?;
             let val = self.parse_pipe()?;
             pairs.push((key, val));
             while self.match_char(',') {
-                let key = self.parse_pipe()?;
+                let key = self.parse_object_key_expr()?;
                 self.expect(':')?;
                 let val = self.parse_pipe()?;
                 pairs.push((key, val));
@@ -553,9 +603,11 @@ impl Parser {
     }
 
     fn parse_number(&mut self, positive: bool) -> Result<f64, ParseError> {
-        let start = self.pos;
-        if !positive {
-            // already consumed '-'
+        let start = if positive { self.pos } else { self.pos - 1 };
+        if positive {
+            // start from current position
+        } else {
+            // already consumed '-', include it in the string
         }
         while self.pos < self.input.len() && self.char_at(self.pos).is_ascii_digit() {
             self.pos += 1;

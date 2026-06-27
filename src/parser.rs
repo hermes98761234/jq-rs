@@ -39,6 +39,8 @@ pub enum Expr {
     MaxBy(Box<Expr>),                                    // max_by(expr)
     UnaryMinus(Box<Expr>),                               // -expr
     BinaryOp(BinaryOp, Box<Expr>, Box<Expr>),            // e1 op e2
+    Def(String, Vec<String>, Box<Expr>),                  // def name(p1; p2): body
+    Program(Vec<Expr>, Box<Expr>),                        // [def...] followed by main expr
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +88,12 @@ impl Parser {
     }
 
     pub fn parse(&mut self) -> Result<Expr, ParseError> {
+        self.skip_whitespace();
+        let mut defs = Vec::new();
+        while self.match_word("def") {
+            defs.push(self.parse_def()?);
+            self.skip_whitespace();
+        }
         let expr = self.parse_pipe()?;
         self.skip_whitespace();
         if self.pos < self.input.len() {
@@ -98,7 +106,11 @@ impl Parser {
                 pos: self.pos,
             });
         }
-        Ok(expr)
+        if defs.is_empty() {
+            Ok(expr)
+        } else {
+            Ok(Expr::Program(defs, Box::new(expr)))
+        }
     }
 
     fn parse_pipe(&mut self) -> Result<Expr, ParseError> {
@@ -313,7 +325,7 @@ impl Parser {
                     self.skip_whitespace();
                     if self.pos < self.input.len() && self.char_at(self.pos) != ')' {
                         args.push(self.parse_pipe()?);
-                        while self.match_char(',') {
+                        while self.match_char(';') || self.match_char(',') {
                             args.push(self.parse_pipe()?);
                         }
                     }
@@ -519,7 +531,7 @@ impl Parser {
                             self.skip_whitespace();
                             if self.pos < self.input.len() && self.char_at(self.pos) != ')' {
                                 args.push(self.parse_pipe()?);
-                                while self.match_char(',') {
+                                while self.match_char(';') || self.match_char(',') {
                                     args.push(self.parse_pipe()?);
                                 }
                             }
@@ -740,6 +752,41 @@ impl Parser {
         } else {
             false
         }
+    }
+
+    fn parse_def(&mut self) -> Result<Expr, ParseError> {
+        self.skip_whitespace();
+        let name = self.parse_ident()?;
+        self.skip_whitespace();
+        let params = if self.pos < self.input.len() && self.char_at(self.pos) == '(' {
+            self.pos += 1; // consume '('
+            let mut params = Vec::new();
+            self.skip_whitespace();
+            if self.pos < self.input.len() && self.char_at(self.pos) != ')' {
+                // optional leading $
+                if self.pos < self.input.len() && self.char_at(self.pos) == '$' {
+                    self.pos += 1;
+                }
+                params.push(self.parse_ident()?);
+                while self.match_char(';') {
+                    self.skip_whitespace();
+                    if self.pos < self.input.len() && self.char_at(self.pos) == '$' {
+                        self.pos += 1;
+                    }
+                    params.push(self.parse_ident()?);
+                }
+            }
+            self.expect(')')?;
+            params
+        } else {
+            vec![]
+        };
+        self.skip_whitespace();
+        self.expect(':')?;
+        let body = self.parse_pipe()?;
+        self.skip_whitespace();
+        self.expect(';')?;
+        Ok(Expr::Def(name, params, Box::new(body)))
     }
 }
 

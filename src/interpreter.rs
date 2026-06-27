@@ -24,15 +24,21 @@ impl InterpreterError {
     }
 }
 
-/// A context for variable bindings during interpretation.
+/// A context for variable bindings and function definitions during interpretation.
 #[derive(Clone)]
 pub struct Context {
     pub vars: Vec<(String, JqValue)>,
+    pub fns: Vec<(String, Vec<String>, Expr)>,
+    pub filter_args: Vec<(String, Expr)>,
 }
 
 impl Context {
     pub fn new() -> Self {
-        Context { vars: Vec::new() }
+        Context {
+            vars: Vec::new(),
+            fns: Vec::new(),
+            filter_args: Vec::new(),
+        }
     }
 
     pub fn push_var(&mut self, name: &str, value: JqValue) {
@@ -45,6 +51,18 @@ impl Context {
             .rev()
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.clone())
+    }
+
+    pub fn push_fn(&mut self, name: String, params: Vec<String>, body: Expr) {
+        self.fns.push((name, params, body));
+    }
+
+    pub fn get_fn(&self, name: &str) -> Option<(Vec<String>, Expr)> {
+        self.fns
+            .iter()
+            .rev()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, p, b)| (p.clone(), b.clone()))
     }
 }
 
@@ -103,14 +121,7 @@ impl Interpreter {
                 let mut arr = Vec::new();
                 for elem in elements {
                     let vals = self.run(elem, input, ctx)?;
-                    if vals.len() == 1 {
-                        arr.push(vals[0].clone());
-                    } else if vals.is_empty() {
-                        // produce nothing
-                    } else {
-                        // multiple values: produce multiple arrays? For simplicity, take first
-                        arr.push(vals[0].clone());
-                    }
+                    arr.extend(vals);
                 }
                 Ok(vec![JqValue::Array(arr)])
             }
@@ -296,6 +307,20 @@ impl Interpreter {
                 let result = self.eval_binary_op(op, &l, &r)?;
                 Ok(vec![result])
             }
+
+            Expr::Program(defs, body) => {
+                for def in defs {
+                    if let Expr::Def(name, params, def_body) = def {
+                        ctx.push_fn(name.clone(), params.clone(), (**def_body).clone());
+                    }
+                }
+                self.run(body, input, ctx)
+            }
+
+            Expr::Def(_, _, _) => {
+                // standalone def — no-op, already registered by Program
+                Ok(vec![input.clone()])
+            }
         }
     }
 
@@ -455,6 +480,30 @@ impl Interpreter {
         input: &JqValue,
         ctx: &mut Context,
     ) -> Result<Vec<JqValue>, InterpreterError> {
+        // Check filter args first (for function parameters passed as filters)
+        if args.is_empty() {
+            if let Some((_, filter_expr)) = ctx
+                .filter_args
+                .iter()
+                .rev()
+                .find(|(n, _)| n.as_str() == name)
+                .map(|(n, e)| (n.clone(), e.clone()))
+            {
+                return self.run(&filter_expr, input, ctx);
+            }
+        }
+
+        // Check user-defined functions
+        if let Some((params, body)) = ctx.get_fn(name) {
+            let mut child_ctx = ctx.clone();
+            for (param, arg_expr) in params.iter().zip(args.iter()) {
+                child_ctx.filter_args.push((param.clone(), arg_expr.clone()));
+            }
+            // Enable recursion: re-register the function in the child context
+            child_ctx.push_fn(name.to_string(), params, body.clone());
+            return self.run(&body, input, &mut child_ctx);
+        }
+
         match name {
             "length" => {
                 if !args.is_empty() {
@@ -957,4 +1006,64 @@ fn del_path(mut root: JqValue, path: &[JqValue]) -> JqValue {
         _ => {}
     }
     root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::Parser;
+
+    fn run_filter(filter: &str, input: &str) -> Result<Vec<JqValue>, InterpreterError> {
+        let mut p = Parser::new(filter);
+        let expr = p.parse().map_err(|e| InterpreterError::new(e.to_string()))?;
+        let val: serde_json::Value = serde_json::from_str(input).unwrap();
+        let jv = JqValue::from(val);
+        let interp = Interpreter::new();
+        let mut ctx = Context::new();
+        interp.run(&expr, &jv, &mut ctx)
+    }
+
+    #[test]
+    fn test_def_no_args() {
+        let result = run_filter("def double: . * 2; 5 | double", "null").unwrap();
+        assert_eq!(result, vec![JqValue::Number(10.0)]);
+    }
+
+    #[test]
+    fn test_def_with_arg() {
+        let result = run_filter("def add(x): . + x; 5 | add(3)", "null").unwrap();
+        assert_eq!(result, vec![JqValue::Number(8.0)]);
+    }
+
+    #[test]
+    fn test_def_recursive() {
+        let result = run_filter(
+            "def fact: if . <= 1 then 1 else . * ((. - 1) | fact) end; 5 | fact",
+            "null",
+        )
+        .unwrap();
+        assert_eq!(result, vec![JqValue::Number(120.0)]);
+    }
+
+    #[test]
+    fn test_def_filter_arg() {
+        // def map2(f): [.[] | f]
+        let result = run_filter("def map2(f): [.[] | f]; [1,2,3] | map2(. * 2)", "null").unwrap();
+        assert_eq!(
+            result,
+            vec![JqValue::Array(vec![
+                JqValue::Number(2.0),
+                JqValue::Number(4.0),
+                JqValue::Number(6.0)
+            ])]
+        );
+    }
+
+    #[test]
+    fn test_def_multiple() {
+        let result =
+            run_filter("def double: . * 2; def triple: . * 3; 4 | double | triple", "null")
+                .unwrap();
+        assert_eq!(result, vec![JqValue::Number(24.0)]);
+    }
 }

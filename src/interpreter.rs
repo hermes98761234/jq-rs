@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use regex::{Regex, RegexBuilder};
+
 use crate::parser::{BinaryOp, Expr};
 use crate::value::JqValue;
 
@@ -880,6 +882,106 @@ impl Interpreter {
                 };
                 Err(InterpreterError::new(msg))
             }
+            "test" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(InterpreterError::new("test takes 1 or 2 arguments"));
+                }
+                let s = match input {
+                    JqValue::String(s) => s.clone(),
+                    _ => return Err(InterpreterError::new("test requires string input")),
+                };
+                let pattern = match self.eval_to_single(&args[0], input, ctx)? {
+                    JqValue::String(p) => p,
+                    _ => return Err(InterpreterError::new("test regex must be a string")),
+                };
+                let flags = if args.len() == 2 {
+                    match self.eval_to_single(&args[1], input, ctx)? {
+                        JqValue::String(f) => f,
+                        _ => String::new(),
+                    }
+                } else {
+                    String::new()
+                };
+                let re = build_regex(&pattern, &flags)?;
+                Ok(vec![JqValue::Bool(re.is_match(&s))])
+            }
+
+            "match" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(InterpreterError::new("match takes 1 or 2 arguments"));
+                }
+                let s = match input {
+                    JqValue::String(s) => s.clone(),
+                    _ => return Err(InterpreterError::new("match requires string input")),
+                };
+                let pattern = match self.eval_to_single(&args[0], input, ctx)? {
+                    JqValue::String(p) => p,
+                    _ => return Err(InterpreterError::new("match regex must be a string")),
+                };
+                let flags = if args.len() == 2 {
+                    match self.eval_to_single(&args[1], input, ctx)? {
+                        JqValue::String(f) => f,
+                        _ => String::new(),
+                    }
+                } else {
+                    String::new()
+                };
+                let global = flags.contains('g');
+                let re = build_regex(&pattern, &flags.replace('g', ""))?;
+                if global {
+                    let results: Vec<JqValue> = re.captures_iter(&s)
+                        .map(|caps| {
+                            let m = caps.get(0).unwrap();
+                            regex_match_to_object(m, &caps, &re)
+                        })
+                        .collect();
+                    Ok(vec![JqValue::Array(results)])
+                } else {
+                    match re.captures(&s) {
+                        Some(caps) => {
+                            let m = caps.get(0).unwrap();
+                            Ok(vec![regex_match_to_object(m, &caps, &re)])
+                        }
+                        None => Err(InterpreterError::new("no match")),
+                    }
+                }
+            }
+
+            "capture" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(InterpreterError::new("capture takes 1 or 2 arguments"));
+                }
+                let s = match input {
+                    JqValue::String(s) => s.clone(),
+                    _ => return Err(InterpreterError::new("capture requires string input")),
+                };
+                let pattern = match self.eval_to_single(&args[0], input, ctx)? {
+                    JqValue::String(p) => p,
+                    _ => return Err(InterpreterError::new("capture regex must be a string")),
+                };
+                let flags = if args.len() == 2 {
+                    match self.eval_to_single(&args[1], input, ctx)? {
+                        JqValue::String(f) => f,
+                        _ => String::new(),
+                    }
+                } else {
+                    String::new()
+                };
+                let re = build_regex(&pattern, &flags)?;
+                match re.captures(&s) {
+                    Some(caps) => {
+                        let mut map = std::collections::BTreeMap::new();
+                        for name in re.capture_names().flatten() {
+                            if let Some(m) = caps.name(name) {
+                                map.insert(name.to_string(), JqValue::String(m.as_str().to_string()));
+                            }
+                        }
+                        Ok(vec![JqValue::Object(map)])
+                    }
+                    None => Err(InterpreterError::new("no match")),
+                }
+            }
+
             _ => Err(InterpreterError::new(format!("Unknown function: {}", name))),
         }
     }
@@ -1008,6 +1110,39 @@ fn del_path(mut root: JqValue, path: &[JqValue]) -> JqValue {
     root
 }
 
+fn build_regex(pattern: &str, flags: &str) -> Result<Regex, InterpreterError> {
+    let mut builder = RegexBuilder::new(pattern);
+    for flag in flags.chars() {
+        match flag {
+            'i' => { builder.case_insensitive(true); }
+            'x' => { builder.ignore_whitespace(true); }
+            's' => { builder.dot_matches_new_line(true); }
+            'm' => { builder.multi_line(true); }
+            _ => {}
+        }
+    }
+    builder.build().map_err(|e| InterpreterError::new(format!("Invalid regex: {}", e)))
+}
+
+fn regex_match_to_object(m: regex::Match, captures: &regex::Captures, re: &Regex) -> JqValue {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("offset".to_string(), JqValue::Number(m.start() as f64));
+    map.insert("length".to_string(), JqValue::Number(m.as_str().len() as f64));
+    map.insert("string".to_string(), JqValue::String(m.as_str().to_string()));
+    let caps: Vec<JqValue> = re.capture_names().enumerate().skip(1).filter_map(|(i, name)| {
+        captures.get(i).map(|cm| {
+            let mut cmap = std::collections::BTreeMap::new();
+            cmap.insert("offset".to_string(), JqValue::Number(cm.start() as f64));
+            cmap.insert("length".to_string(), JqValue::Number(cm.as_str().len() as f64));
+            cmap.insert("string".to_string(), JqValue::String(cm.as_str().to_string()));
+            cmap.insert("name".to_string(), name.map(|n| JqValue::String(n.to_string())).unwrap_or(JqValue::Null));
+            JqValue::Object(cmap)
+        })
+    }).collect();
+    map.insert("captures".to_string(), JqValue::Array(caps));
+    JqValue::Object(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,5 +1200,48 @@ mod tests {
             run_filter("def double: . * 2; def triple: . * 3; 4 | double | triple", "null")
                 .unwrap();
         assert_eq!(result, vec![JqValue::Number(24.0)]);
+    }
+
+    #[test]
+    fn test_regex_test_basic() {
+        let result = run_filter(r#"test("wor")"#, r#""hello world""#).unwrap();
+        assert_eq!(result, vec![JqValue::Bool(true)]);
+    }
+
+    #[test]
+    fn test_regex_test_no_match() {
+        let result = run_filter(r#"test("xyz")"#, r#""hello world""#).unwrap();
+        assert_eq!(result, vec![JqValue::Bool(false)]);
+    }
+
+    #[test]
+    fn test_regex_test_flags_case_insensitive() {
+        let result = run_filter(r#"test("HELLO"; "i")"#, r#""hello world""#).unwrap();
+        assert_eq!(result, vec![JqValue::Bool(true)]);
+    }
+
+    #[test]
+    fn test_regex_match_basic() {
+        let result = run_filter(r#"match("wor")"#, r#""hello world""#).unwrap();
+        assert_eq!(result.len(), 1);
+        if let JqValue::Object(map) = &result[0] {
+            assert_eq!(map.get("string"), Some(&JqValue::String("wor".to_string())));
+            assert_eq!(map.get("offset"), Some(&JqValue::Number(6.0)));
+            assert_eq!(map.get("length"), Some(&JqValue::Number(3.0)));
+        } else {
+            panic!("Expected object from match");
+        }
+    }
+
+    #[test]
+    fn test_regex_capture_named() {
+        let result = run_filter(r#"capture("(?P<first>\w+) (?P<second>\w+)")"#, r#""hello world""#).unwrap();
+        assert_eq!(result.len(), 1);
+        if let JqValue::Object(map) = &result[0] {
+            assert_eq!(map.get("first"), Some(&JqValue::String("hello".to_string())));
+            assert_eq!(map.get("second"), Some(&JqValue::String("world".to_string())));
+        } else {
+            panic!("Expected object from capture");
+        }
     }
 }

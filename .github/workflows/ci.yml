@@ -103,12 +103,17 @@ jobs:
       - name: List artifacts
         run: ls -R artifacts
 
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          cp artifacts/jq-rs-linux-x86_64/jq-rs release/jq-rs-linux-x86_64
+          cp artifacts/jq-rs-macos-aarch64/jq-rs release/jq-rs-macos-aarch64
+          cp artifacts/jq-rs-windows-x86_64.exe/jq-rs.exe release/jq-rs-windows-x86_64.exe
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/jq-rs-linux-x86_64/jq-rs
-            artifacts/jq-rs-macos-aarch64/jq-rs
-            artifacts/jq-rs-windows-x86_64.exe/jq-rs.exe
+            release/*
           generate_release_notes: true
           fail_on_unmatched_files: true

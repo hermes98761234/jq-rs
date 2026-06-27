@@ -503,7 +503,9 @@ impl Interpreter {
         if let Some((params, body)) = ctx.get_fn(name) {
             let mut child_ctx = ctx.clone();
             for (param, arg_expr) in params.iter().zip(args.iter()) {
-                child_ctx.filter_args.push((param.clone(), arg_expr.clone()));
+                child_ctx
+                    .filter_args
+                    .push((param.clone(), arg_expr.clone()));
             }
             // Enable recursion: re-register the function in the child context
             child_ctx.push_fn(name.to_string(), params, body.clone());
@@ -890,7 +892,9 @@ impl Interpreter {
                 if !args.is_empty() {
                     return Err(InterpreterError::new("input_filename takes no arguments"));
                 }
-                Ok(vec![ctx.input_filename.clone()
+                Ok(vec![ctx
+                    .input_filename
+                    .clone()
                     .map(JqValue::String)
                     .unwrap_or(JqValue::Null)])
             }
@@ -950,7 +954,8 @@ impl Interpreter {
                 let global = flags.contains('g');
                 let re = build_regex(&pattern, &flags.replace('g', ""))?;
                 if global {
-                    let results: Vec<JqValue> = re.captures_iter(&s)
+                    let results: Vec<JqValue> = re
+                        .captures_iter(&s)
                         .map(|caps| {
                             let m = caps.get(0).unwrap();
                             regex_match_to_object(m, &caps, &re)
@@ -994,7 +999,10 @@ impl Interpreter {
                         let mut map = std::collections::BTreeMap::new();
                         for name in re.capture_names().flatten() {
                             if let Some(m) = caps.name(name) {
-                                map.insert(name.to_string(), JqValue::String(m.as_str().to_string()));
+                                map.insert(
+                                    name.to_string(),
+                                    JqValue::String(m.as_str().to_string()),
+                                );
                             }
                         }
                         Ok(vec![JqValue::Object(map)])
@@ -1135,31 +1143,62 @@ fn build_regex(pattern: &str, flags: &str) -> Result<Regex, InterpreterError> {
     let mut builder = RegexBuilder::new(pattern);
     for flag in flags.chars() {
         match flag {
-            'i' => { builder.case_insensitive(true); }
-            'x' => { builder.ignore_whitespace(true); }
-            's' => { builder.dot_matches_new_line(true); }
-            'm' => { builder.multi_line(true); }
+            'i' => {
+                builder.case_insensitive(true);
+            }
+            'x' => {
+                builder.ignore_whitespace(true);
+            }
+            's' => {
+                builder.dot_matches_new_line(true);
+            }
+            'm' => {
+                builder.multi_line(true);
+            }
             _ => {}
         }
     }
-    builder.build().map_err(|e| InterpreterError::new(format!("Invalid regex: {}", e)))
+    builder
+        .build()
+        .map_err(|e| InterpreterError::new(format!("Invalid regex: {}", e)))
 }
 
 fn regex_match_to_object(m: regex::Match, captures: &regex::Captures, re: &Regex) -> JqValue {
     let mut map = std::collections::BTreeMap::new();
     map.insert("offset".to_string(), JqValue::Number(m.start() as f64));
-    map.insert("length".to_string(), JqValue::Number(m.as_str().len() as f64));
-    map.insert("string".to_string(), JqValue::String(m.as_str().to_string()));
-    let caps: Vec<JqValue> = re.capture_names().enumerate().skip(1).filter_map(|(i, name)| {
-        captures.get(i).map(|cm| {
-            let mut cmap = std::collections::BTreeMap::new();
-            cmap.insert("offset".to_string(), JqValue::Number(cm.start() as f64));
-            cmap.insert("length".to_string(), JqValue::Number(cm.as_str().len() as f64));
-            cmap.insert("string".to_string(), JqValue::String(cm.as_str().to_string()));
-            cmap.insert("name".to_string(), name.map(|n| JqValue::String(n.to_string())).unwrap_or(JqValue::Null));
-            JqValue::Object(cmap)
+    map.insert(
+        "length".to_string(),
+        JqValue::Number(m.as_str().len() as f64),
+    );
+    map.insert(
+        "string".to_string(),
+        JqValue::String(m.as_str().to_string()),
+    );
+    let caps: Vec<JqValue> = re
+        .capture_names()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(i, name)| {
+            captures.get(i).map(|cm| {
+                let mut cmap = std::collections::BTreeMap::new();
+                cmap.insert("offset".to_string(), JqValue::Number(cm.start() as f64));
+                cmap.insert(
+                    "length".to_string(),
+                    JqValue::Number(cm.as_str().len() as f64),
+                );
+                cmap.insert(
+                    "string".to_string(),
+                    JqValue::String(cm.as_str().to_string()),
+                );
+                cmap.insert(
+                    "name".to_string(),
+                    name.map(|n| JqValue::String(n.to_string()))
+                        .unwrap_or(JqValue::Null),
+                );
+                JqValue::Object(cmap)
+            })
         })
-    }).collect();
+        .collect();
     map.insert("captures".to_string(), JqValue::Array(caps));
     JqValue::Object(map)
 }
@@ -1171,7 +1210,9 @@ mod tests {
 
     fn run_filter(filter: &str, input: &str) -> Result<Vec<JqValue>, InterpreterError> {
         let mut p = Parser::new(filter);
-        let expr = p.parse().map_err(|e| InterpreterError::new(e.to_string()))?;
+        let expr = p
+            .parse()
+            .map_err(|e| InterpreterError::new(e.to_string()))?;
         let val: serde_json::Value = serde_json::from_str(input).unwrap();
         let jv = JqValue::from(val);
         let interp = Interpreter::new();
@@ -1217,9 +1258,11 @@ mod tests {
 
     #[test]
     fn test_def_multiple() {
-        let result =
-            run_filter("def double: . * 2; def triple: . * 3; 4 | double | triple", "null")
-                .unwrap();
+        let result = run_filter(
+            "def double: . * 2; def triple: . * 3; 4 | double | triple",
+            "null",
+        )
+        .unwrap();
         assert_eq!(result, vec![JqValue::Number(24.0)]);
     }
 
@@ -1256,11 +1299,21 @@ mod tests {
 
     #[test]
     fn test_regex_capture_named() {
-        let result = run_filter(r#"capture("(?P<first>\w+) (?P<second>\w+)")"#, r#""hello world""#).unwrap();
+        let result = run_filter(
+            r#"capture("(?P<first>\w+) (?P<second>\w+)")"#,
+            r#""hello world""#,
+        )
+        .unwrap();
         assert_eq!(result.len(), 1);
         if let JqValue::Object(map) = &result[0] {
-            assert_eq!(map.get("first"), Some(&JqValue::String("hello".to_string())));
-            assert_eq!(map.get("second"), Some(&JqValue::String("world".to_string())));
+            assert_eq!(
+                map.get("first"),
+                Some(&JqValue::String("hello".to_string()))
+            );
+            assert_eq!(
+                map.get("second"),
+                Some(&JqValue::String("world".to_string()))
+            );
         } else {
             panic!("Expected object from capture");
         }
@@ -1269,7 +1322,10 @@ mod tests {
     #[test]
     fn test_input_filename_null() {
         let mut p = Parser::new("input_filename");
-        let expr = p.parse().map_err(|e| InterpreterError::new(e.to_string())).unwrap();
+        let expr = p
+            .parse()
+            .map_err(|e| InterpreterError::new(e.to_string()))
+            .unwrap();
         let interp = Interpreter::new();
         let mut ctx = Context::new();
         ctx.input_filename = None;
@@ -1280,7 +1336,10 @@ mod tests {
     #[test]
     fn test_input_filename_set() {
         let mut p = Parser::new("input_filename");
-        let expr = p.parse().map_err(|e| InterpreterError::new(e.to_string())).unwrap();
+        let expr = p
+            .parse()
+            .map_err(|e| InterpreterError::new(e.to_string()))
+            .unwrap();
         let interp = Interpreter::new();
         let mut ctx = Context::new();
         ctx.input_filename = Some("test.json".to_string());
@@ -1291,16 +1350,29 @@ mod tests {
     #[test]
     fn test_inputs_drains_remaining() {
         let mut p = Parser::new("[inputs]");
-        let expr = p.parse().map_err(|e| InterpreterError::new(e.to_string())).unwrap();
+        let expr = p
+            .parse()
+            .map_err(|e| InterpreterError::new(e.to_string()))
+            .unwrap();
         let interp = Interpreter::new();
         let mut ctx = Context::new();
-        ctx.remaining_inputs = vec![JqValue::Number(1.0), JqValue::Number(2.0), JqValue::Number(3.0)];
-        let result = interp.run(&expr, &JqValue::Null, &mut ctx).unwrap();
-        assert_eq!(result, vec![JqValue::Array(vec![
+        ctx.remaining_inputs = vec![
             JqValue::Number(1.0),
             JqValue::Number(2.0),
             JqValue::Number(3.0),
-        ])]);
-        assert!(ctx.remaining_inputs.is_empty(), "inputs should drain the list");
+        ];
+        let result = interp.run(&expr, &JqValue::Null, &mut ctx).unwrap();
+        assert_eq!(
+            result,
+            vec![JqValue::Array(vec![
+                JqValue::Number(1.0),
+                JqValue::Number(2.0),
+                JqValue::Number(3.0),
+            ])]
+        );
+        assert!(
+            ctx.remaining_inputs.is_empty(),
+            "inputs should drain the list"
+        );
     }
 }

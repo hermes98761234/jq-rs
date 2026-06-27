@@ -250,7 +250,10 @@ mod tests {
     fn test_colorize_string_contains_ansi() {
         let val = JqValue::String("hello".to_string());
         let out = format_output(val, false, false, true);
-        assert!(out.contains("\x1b["), "Expected ANSI codes in colored output");
+        assert!(
+            out.contains("\x1b["),
+            "Expected ANSI codes in colored output"
+        );
         assert!(out.contains("hello"), "Expected string content");
     }
 
@@ -312,7 +315,6 @@ const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 const GREEN: &str = "\x1b[0;32m";
 const BLUE: &str = "\x1b[0;34m";
-const DARK: &str = "\x1b[1;30m";
 
 fn colorize_json(val: &JqValue, indent: usize, colored: bool) -> String {
     let pad = "  ".repeat(indent);

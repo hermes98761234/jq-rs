@@ -39,8 +39,8 @@ pub enum Expr {
     MaxBy(Box<Expr>),                                    // max_by(expr)
     UnaryMinus(Box<Expr>),                               // -expr
     BinaryOp(BinaryOp, Box<Expr>, Box<Expr>),            // e1 op e2
-    Def(String, Vec<String>, Box<Expr>),                  // def name(p1; p2): body
-    Program(Vec<Expr>, Box<Expr>),                        // [def...] followed by main expr
+    Def(String, Vec<String>, Box<Expr>),                 // def name(p1; p2): body
+    Program(Vec<Expr>, Box<Expr>),                       // [def...] followed by main expr
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -848,7 +848,10 @@ impl Parser {
         self.parse_string()
     }
 
-    fn resolve_module_path(path: &str, search_paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    fn resolve_module_path(
+        path: &str,
+        search_paths: &[std::path::PathBuf],
+    ) -> Option<std::path::PathBuf> {
         let with_ext = if path.ends_with(".jq") {
             path.to_string()
         } else {
@@ -872,7 +875,7 @@ impl Parser {
             }
         }
         // ~/.jq/
-        if let Some(home) = std::env::var("HOME").ok() {
+        if let Ok(home) = std::env::var("HOME") {
             paths.push(std::path::PathBuf::from(home).join(".jq"));
         }
         // current directory
@@ -889,12 +892,11 @@ impl Parser {
             return Ok(vec![]); // circular import guard
         }
         let search_paths = Parser::module_search_paths();
-        let file_path = Parser::resolve_module_path(module_path, &search_paths).ok_or_else(|| {
-            ParseError {
+        let file_path =
+            Parser::resolve_module_path(module_path, &search_paths).ok_or_else(|| ParseError {
                 message: format!("Module not found: {}", module_path),
                 pos: 0,
-            }
-        })?;
+            })?;
         let source = std::fs::read_to_string(&file_path).map_err(|e| ParseError {
             message: format!("Failed to read module {}: {}", file_path.display(), e),
             pos: 0,
@@ -911,13 +913,16 @@ impl Parser {
         }
         // Apply namespace prefix if given
         if let Some(ns) = namespace {
-            defs = defs.into_iter().map(|d| {
-                if let Expr::Def(name, params, body) = d {
-                    Expr::Def(format!("{}::{}", ns, name), params, body)
-                } else {
-                    d
-                }
-            }).collect();
+            defs = defs
+                .into_iter()
+                .map(|d| {
+                    if let Expr::Def(name, params, body) = d {
+                        Expr::Def(format!("{}::{}", ns, name), params, body)
+                    } else {
+                        d
+                    }
+                })
+                .collect();
         }
         Ok(defs)
     }

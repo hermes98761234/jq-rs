@@ -72,6 +72,9 @@ fn main() -> anyhow::Result<()> {
     let raw_output = matches.get_flag("raw");
     let slurp = matches.get_flag("slurp");
     let null_input = matches.get_flag("null-input");
+    let monochrome = matches.get_flag("monochrome");
+    use std::io::IsTerminal;
+    let colored = std::io::stdout().is_terminal() && !monochrome;
 
     // Parse the filter expression
     let filter_str = if let Some(filter) = matches.get_one::<String>("filter") {
@@ -128,7 +131,7 @@ fn main() -> anyhow::Result<()> {
             .run(&expr, input, &mut ctx)
             .map_err(|e| anyhow!("{}", e))?;
         for result in results {
-            let output_str = format_output(result, compact, raw_output);
+            let output_str = format_output(result, compact, raw_output, colored);
             outputs.push(output_str);
         }
     }
@@ -261,25 +264,135 @@ fn json_consumed_length(s: &str) -> usize {
     s.len()
 }
 
-fn format_output(value: JqValue, compact: bool, raw_output: bool) -> String {
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::JqValue;
+
+    #[test]
+    fn test_colorize_string_contains_ansi() {
+        let val = JqValue::String("hello".to_string());
+        let out = format_output(val, false, false, true);
+        assert!(out.contains("\x1b["), "Expected ANSI codes in colored output");
+        assert!(out.contains("hello"), "Expected string content");
+    }
+
+    #[test]
+    fn test_no_color_when_disabled() {
+        let val = JqValue::String("hello".to_string());
+        let out = format_output(val, false, false, false);
+        assert!(!out.contains("\x1b["), "Expected no ANSI codes");
+    }
+
+    #[test]
+    fn test_colorize_number() {
+        let val = JqValue::Number(42.0);
+        let out = format_output(val, false, false, true);
+        assert!(out.contains("42"), "Expected number in output");
+    }
+}
+
+fn format_output(value: JqValue, compact: bool, raw_output: bool, colored: bool) -> String {
     if raw_output {
-        match &value {
+        return match &value {
             JqValue::String(s) => s.clone(),
             JqValue::Null => "null".to_string(),
-            _ => {
-                // For raw output, format as JSON but use to_string()
-                format!("{}", value)
+            _ => colorize_json(&value, 0, false),
+        };
+    }
+    if compact {
+        let sval: serde_json::Value = value.into();
+        return serde_json::to_string(&sval).unwrap_or_default();
+    }
+    colorize_json(&value, 0, colored)
+}
+
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const GREEN: &str = "\x1b[0;32m";
+const BLUE: &str = "\x1b[0;34m";
+const DARK: &str = "\x1b[1;30m";
+
+fn colorize_json(val: &JqValue, indent: usize, colored: bool) -> String {
+    let pad = "  ".repeat(indent);
+    let pad1 = "  ".repeat(indent + 1);
+    match val {
+        JqValue::Null => {
+            if colored {
+                format!("{BOLD}null{RESET}")
+            } else {
+                "null".to_string()
             }
         }
-    } else {
-        if compact {
-            // Use serde_json compact format
-            let sval: serde_json::Value = value.into();
-            serde_json::to_string(&sval).unwrap_or_default()
-        } else {
-            // Pretty print using serde_json
-            let sval: serde_json::Value = value.into();
-            serde_json::to_string_pretty(&sval).unwrap_or_default()
+        JqValue::Bool(b) => {
+            let s = if *b { "true" } else { "false" };
+            if colored {
+                format!("{BOLD}{s}{RESET}")
+            } else {
+                s.to_string()
+            }
+        }
+        JqValue::Number(n) => {
+            let s = if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            };
+            if colored {
+                format!("{BLUE}{s}{RESET}")
+            } else {
+                s
+            }
+        }
+        JqValue::String(s) => {
+            let escaped = serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s));
+            if colored {
+                format!("{GREEN}{escaped}{RESET}")
+            } else {
+                escaped
+            }
+        }
+        JqValue::Array(arr) => {
+            if arr.is_empty() {
+                return "[]".to_string();
+            }
+            let mut out = "[\n".to_string();
+            for (i, item) in arr.iter().enumerate() {
+                out.push_str(&pad1);
+                out.push_str(&colorize_json(item, indent + 1, colored));
+                if i + 1 < arr.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push(']');
+            out
+        }
+        JqValue::Object(map) => {
+            if map.is_empty() {
+                return "{}".to_string();
+            }
+            let mut out = "{\n".to_string();
+            let entries: Vec<_> = map.iter().collect();
+            for (i, (k, v)) in entries.iter().enumerate() {
+                let key_str = serde_json::to_string(k).unwrap_or_else(|_| format!("\"{}\"", k));
+                out.push_str(&pad1);
+                if colored {
+                    out.push_str(&format!("{BOLD}{BLUE}{key_str}{RESET}"));
+                } else {
+                    out.push_str(&key_str);
+                }
+                out.push_str(": ");
+                out.push_str(&colorize_json(v, indent + 1, colored));
+                if i + 1 < entries.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push('}');
+            out
         }
     }
 }

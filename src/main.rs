@@ -61,6 +61,12 @@ fn main() -> anyhow::Result<()> {
                 .required(false),
         )
         .arg(
+            Arg::new("files")
+                .help("Input JSON files (reads stdin if none given)")
+                .num_args(0..)
+                .value_name("FILE"),
+        )
+        .arg(
             Arg::new("args")
                 .help("Positional arguments to pass to the filter")
                 .num_args(0..)
@@ -94,39 +100,59 @@ fn main() -> anyhow::Result<()> {
     let mut parser = Parser::new(&filter_str);
     let expr = parser.parse().map_err(|e| anyhow!("Parse error: {}", e))?;
 
-    // Read all input
-    let mut input_text = String::new();
-    io::stdin()
-        .read_to_string(&mut input_text)
-        .with_context(|| "Failed to read from stdin")?;
+    // Always collect stdin/file values (needed for `inputs` builtin even in -n mode)
+    let file_paths: Vec<String> = matches
+        .get_many::<String>("files")
+        .unwrap_or_default()
+        .cloned()
+        .collect();
 
-    // Parse input JSON(s)
-    let input_values: Vec<JqValue> = if null_input {
-        vec![JqValue::Null]
-    } else {
-        let trimmed = input_text.trim();
-        if trimmed.is_empty() {
-            vec![]
-        } else if slurp {
-            // Try to parse as a stream and wrap in array
-            let values = parse_json_stream(trimmed);
-            if values.is_empty() {
-                vec![]
-            } else {
-                vec![JqValue::Array(values)]
-            }
-        } else {
-            parse_json_stream(trimmed)
+    let mut raw_inputs: Vec<(Option<String>, JqValue)> = Vec::new();
+    if file_paths.is_empty() {
+        let mut text = String::new();
+        io::stdin()
+            .read_to_string(&mut text)
+            .with_context(|| "Failed to read from stdin")?;
+        for v in parse_json_stream(text.trim()) {
+            raw_inputs.push((None, v));
         }
+    } else {
+        for path in &file_paths {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read file: {}", path))?;
+            for v in parse_json_stream(text.trim()) {
+                raw_inputs.push((Some(path.clone()), v));
+            }
+        }
+    }
+    let all_raw_values: Vec<JqValue> = raw_inputs.iter().map(|(_, v)| v.clone()).collect();
+
+    // Build all_inputs: what gets processed as main inputs
+    let all_inputs: Vec<(Option<String>, JqValue)> = if null_input {
+        vec![(None, JqValue::Null)]
+    } else if slurp {
+        let values: Vec<JqValue> = raw_inputs.iter().map(|(_, v)| v.clone()).collect();
+        vec![(None, JqValue::Array(values))]
+    } else {
+        raw_inputs
     };
 
     let interpreter = Interpreter::new();
-    let mut ctx = Context::new();
 
     // Process each input
     let mut outputs: Vec<String> = Vec::new();
 
-    for input in &input_values {
+    for (i, (filename, input)) in all_inputs.iter().enumerate() {
+        let mut ctx = Context::new();
+        ctx.input_filename = filename.clone();
+        // In null-input mode all stdin values are available via `inputs`;
+        // otherwise, remaining inputs are the ones after the current index.
+        ctx.remaining_inputs = if null_input {
+            all_raw_values.clone()
+        } else {
+            all_inputs[i + 1..].iter().map(|(_, v)| v.clone()).collect()
+        };
+
         let results = interpreter
             .run(&expr, input, &mut ctx)
             .map_err(|e| anyhow!("{}", e))?;

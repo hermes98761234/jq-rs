@@ -32,6 +32,8 @@ pub struct Context {
     pub vars: Vec<(String, JqValue)>,
     pub fns: Vec<(String, Vec<String>, Expr)>,
     pub filter_args: Vec<(String, Expr)>,
+    pub input_filename: Option<String>,
+    pub remaining_inputs: Vec<JqValue>,
 }
 
 impl Context {
@@ -40,6 +42,8 @@ impl Context {
             vars: Vec::new(),
             fns: Vec::new(),
             filter_args: Vec::new(),
+            input_filename: None,
+            remaining_inputs: Vec::new(),
         }
     }
 
@@ -874,6 +878,23 @@ impl Interpreter {
                 });
                 Ok(vec![JqValue::Bool(any_true)])
             }
+            "inputs" => {
+                if !args.is_empty() {
+                    return Err(InterpreterError::new("inputs takes no arguments"));
+                }
+                let values = std::mem::take(&mut ctx.remaining_inputs);
+                Ok(values)
+            }
+
+            "input_filename" => {
+                if !args.is_empty() {
+                    return Err(InterpreterError::new("input_filename takes no arguments"));
+                }
+                Ok(vec![ctx.input_filename.clone()
+                    .map(JqValue::String)
+                    .unwrap_or(JqValue::Null)])
+            }
+
             "error" => {
                 let msg = if args.is_empty() {
                     "".to_string()
@@ -1243,5 +1264,43 @@ mod tests {
         } else {
             panic!("Expected object from capture");
         }
+    }
+
+    #[test]
+    fn test_input_filename_null() {
+        let mut p = Parser::new("input_filename");
+        let expr = p.parse().map_err(|e| InterpreterError::new(e.to_string())).unwrap();
+        let interp = Interpreter::new();
+        let mut ctx = Context::new();
+        ctx.input_filename = None;
+        let result = interp.run(&expr, &JqValue::Null, &mut ctx).unwrap();
+        assert_eq!(result, vec![JqValue::Null]);
+    }
+
+    #[test]
+    fn test_input_filename_set() {
+        let mut p = Parser::new("input_filename");
+        let expr = p.parse().map_err(|e| InterpreterError::new(e.to_string())).unwrap();
+        let interp = Interpreter::new();
+        let mut ctx = Context::new();
+        ctx.input_filename = Some("test.json".to_string());
+        let result = interp.run(&expr, &JqValue::Null, &mut ctx).unwrap();
+        assert_eq!(result, vec![JqValue::String("test.json".to_string())]);
+    }
+
+    #[test]
+    fn test_inputs_drains_remaining() {
+        let mut p = Parser::new("[inputs]");
+        let expr = p.parse().map_err(|e| InterpreterError::new(e.to_string())).unwrap();
+        let interp = Interpreter::new();
+        let mut ctx = Context::new();
+        ctx.remaining_inputs = vec![JqValue::Number(1.0), JqValue::Number(2.0), JqValue::Number(3.0)];
+        let result = interp.run(&expr, &JqValue::Null, &mut ctx).unwrap();
+        assert_eq!(result, vec![JqValue::Array(vec![
+            JqValue::Number(1.0),
+            JqValue::Number(2.0),
+            JqValue::Number(3.0),
+        ])]);
+        assert!(ctx.remaining_inputs.is_empty(), "inputs should drain the list");
     }
 }

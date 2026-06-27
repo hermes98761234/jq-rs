@@ -90,10 +90,38 @@ impl Parser {
     pub fn parse(&mut self) -> Result<Expr, ParseError> {
         self.skip_whitespace();
         let mut defs = Vec::new();
+        let mut visited = Vec::new();
+
+        // Handle import/include at the top
+        loop {
+            if self.match_word("import") {
+                let path = self.parse_module_path()?;
+                self.skip_whitespace();
+                self.expect_word("as")?;
+                self.skip_whitespace();
+                let ns = self.parse_ident()?;
+                self.skip_whitespace();
+                self.expect(';')?;
+                let module_defs = Parser::load_module_defs(&path, Some(&ns), &mut visited)?;
+                defs.extend(module_defs);
+            } else if self.match_word("include") {
+                let path = self.parse_module_path()?;
+                self.skip_whitespace();
+                self.expect(';')?;
+                let module_defs = Parser::load_module_defs(&path, None, &mut visited)?;
+                defs.extend(module_defs);
+            } else {
+                break;
+            }
+            self.skip_whitespace();
+        }
+
+        // Collect local def blocks
         while self.match_word("def") {
             defs.push(self.parse_def()?);
             self.skip_whitespace();
         }
+
         let expr = self.parse_pipe()?;
         self.skip_whitespace();
         if self.pos < self.input.len() {
@@ -685,7 +713,26 @@ impl Parser {
                 pos: self.pos,
             });
         }
-        Ok(self.input[start..self.pos].to_string())
+        let mut name = self.input[start..self.pos].to_string();
+        // Support namespace::name syntax (two colons, not one)
+        while self.pos + 1 < self.input.len()
+            && self.char_at(self.pos) == ':'
+            && self.char_at(self.pos + 1) == ':'
+        {
+            self.pos += 2;
+            let ns_start = self.pos;
+            while self.pos < self.input.len() && is_ident_part(self.char_at(self.pos)) {
+                self.pos += 1;
+            }
+            if self.pos == ns_start {
+                // bare `::` with no following ident — put back and stop
+                self.pos -= 2;
+                break;
+            }
+            name.push_str("::");
+            name.push_str(&self.input[ns_start..self.pos]);
+        }
+        Ok(name)
     }
 
     fn skip_whitespace(&mut self) {
@@ -788,6 +835,92 @@ impl Parser {
         self.expect(';')?;
         Ok(Expr::Def(name, params, Box::new(body)))
     }
+
+    fn parse_module_path(&mut self) -> Result<String, ParseError> {
+        // Module path is a quoted string
+        self.skip_whitespace();
+        if self.pos >= self.input.len() || self.char_at(self.pos) != '"' {
+            return Err(ParseError {
+                message: "Expected quoted module path".to_string(),
+                pos: self.pos,
+            });
+        }
+        self.parse_string()
+    }
+
+    fn resolve_module_path(path: &str, search_paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+        let with_ext = if path.ends_with(".jq") {
+            path.to_string()
+        } else {
+            format!("{}.jq", path)
+        };
+        for dir in search_paths {
+            let candidate = dir.join(&with_ext);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn module_search_paths() -> Vec<std::path::PathBuf> {
+        let mut paths = Vec::new();
+        // $JQLIB env var (colon-separated)
+        if let Ok(jqlib) = std::env::var("JQLIB") {
+            for p in jqlib.split(':') {
+                paths.push(std::path::PathBuf::from(p));
+            }
+        }
+        // ~/.jq/
+        if let Some(home) = std::env::var("HOME").ok() {
+            paths.push(std::path::PathBuf::from(home).join(".jq"));
+        }
+        // current directory
+        paths.push(std::path::PathBuf::from("."));
+        paths
+    }
+
+    fn load_module_defs(
+        module_path: &str,
+        namespace: Option<&str>,
+        visited: &mut Vec<String>,
+    ) -> Result<Vec<Expr>, ParseError> {
+        if visited.contains(&module_path.to_string()) {
+            return Ok(vec![]); // circular import guard
+        }
+        let search_paths = Parser::module_search_paths();
+        let file_path = Parser::resolve_module_path(module_path, &search_paths).ok_or_else(|| {
+            ParseError {
+                message: format!("Module not found: {}", module_path),
+                pos: 0,
+            }
+        })?;
+        let source = std::fs::read_to_string(&file_path).map_err(|e| ParseError {
+            message: format!("Failed to read module {}: {}", file_path.display(), e),
+            pos: 0,
+        })?;
+        visited.push(module_path.to_string());
+        let mut sub_parser = Parser::new(&source);
+        // Parse the module as a sequence of defs (no main expression required)
+        let mut defs = Vec::new();
+        sub_parser.skip_whitespace();
+        while sub_parser.match_word("def") {
+            let def = sub_parser.parse_def()?;
+            defs.push(def);
+            sub_parser.skip_whitespace();
+        }
+        // Apply namespace prefix if given
+        if let Some(ns) = namespace {
+            defs = defs.into_iter().map(|d| {
+                if let Expr::Def(name, params, body) = d {
+                    Expr::Def(format!("{}::{}", ns, name), params, body)
+                } else {
+                    d
+                }
+            }).collect();
+        }
+        Ok(defs)
+    }
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -871,6 +1004,38 @@ mod tests {
         match expr {
             Expr::IfThenElse(_, _, Some(_)) => {}
             _ => panic!("Expected IfThenElse with else branch"),
+        }
+    }
+
+    #[test]
+    fn test_namespaced_ident() {
+        // lib::double should parse as a function call named "lib::double"
+        let mut p = Parser::new("lib::double");
+        let expr = p.parse().unwrap();
+        match expr {
+            Expr::FunctionCall(name, args) => {
+                assert_eq!(name, "lib::double");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected FunctionCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_then_namespaced_call() {
+        // Simulate what include does: def lib::double: . * 2; 5 | lib::double
+        let mut p = Parser::new("def lib::double: . * 2; 5 | lib::double");
+        let expr = p.parse().unwrap();
+        match expr {
+            Expr::Program(defs, _body) => {
+                assert_eq!(defs.len(), 1);
+                if let Expr::Def(name, _, _) = &defs[0] {
+                    assert_eq!(name, "lib::double");
+                } else {
+                    panic!("Expected Def node");
+                }
+            }
+            other => panic!("Expected Program, got {:?}", other),
         }
     }
 }

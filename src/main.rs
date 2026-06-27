@@ -89,7 +89,6 @@ fn main() -> anyhow::Result<()> {
     };
 
     let mut parser = Parser::new(&filter_str);
-    let mut parser = Parser::new(&filter_str);
     let expr = parser.parse().map_err(|e| anyhow!("Parse error: {}", e))?;
 
     // Read all input
@@ -125,7 +124,9 @@ fn main() -> anyhow::Result<()> {
     let mut outputs: Vec<String> = Vec::new();
 
     for input in &input_values {
-        let results = interpreter.run(&expr, input, &mut ctx).map_err(|e| anyhow!("{}", e))?;
+        let results = interpreter
+            .run(&expr, input, &mut ctx)
+            .map_err(|e| anyhow!("{}", e))?;
         for result in results {
             let output_str = format_output(result, compact, raw_output);
             outputs.push(output_str);
@@ -169,7 +170,8 @@ fn parse_json_stream(text: &str) -> Vec<JqValue> {
         match try_parse_json_prefix(substr_trimmed) {
             Some(v) => {
                 values.push(JqValue::from(v));
-                let consumed = substr.len() - substr_trimmed.len() + json_consumed_length(substr_trimmed);
+                let consumed =
+                    substr.len() - substr_trimmed.len() + json_consumed_length(substr_trimmed);
                 offset += consumed;
             }
             None => break,
@@ -194,8 +196,8 @@ fn try_parse_json_prefix(s: &str) -> Option<serde_json::Value> {
 }
 
 fn json_consumed_length(s: &str) -> usize {
-    // Estimate how many bytes of the string were consumed by the deserializer
-    // Use a simple heuristic: find the end of the first JSON value
+    // Determine how many bytes of the string were consumed by the first JSON value.
+    // Handles all JSON token types: objects, arrays, strings, numbers, bools, null.
     let mut depth = 0i32;
     let mut in_string = false;
     let mut escape = false;
@@ -220,12 +222,43 @@ fn json_consumed_length(s: &str) -> usize {
                     }
                 }
                 '"' => in_string = true,
+                't' | 'f' | 'n' if depth == 0 => {
+                    // At top level: could be true, false, or null
+                    let rest = &s[i..];
+                    if rest.starts_with("true") {
+                        return i + 4;
+                    } else if rest.starts_with("false") {
+                        return i + 5;
+                    } else if rest.starts_with("null") {
+                        return i + 4;
+                    }
+                }
+                c if (c.is_ascii_digit() || c == '-') && depth == 0 => {
+                    // A number at top level — scan through the full number literal
+                    let mut end = i + 1;
+                    let bytes = s.as_bytes();
+                    while end < bytes.len() {
+                        let b = bytes[end];
+                        if b.is_ascii_digit()
+                            || b == b'.'
+                            || b == b'e'
+                            || b == b'E'
+                            || b == b'+'
+                            || b == b'-'
+                        {
+                            end += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    return end;
+                }
                 _ => {}
             }
         }
     }
-    // Fallback: if it's a simple value (number, string, bool, null), estimate
-    s.find(|c: char| c == '\n').unwrap_or(s.len())
+    // Fallback: return the full string length
+    s.len()
 }
 
 fn format_output(value: JqValue, compact: bool, raw_output: bool) -> String {

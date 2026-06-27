@@ -55,7 +55,12 @@ impl Interpreter {
         Interpreter
     }
 
-    pub fn run(&self, expr: &Expr, input: &JqValue, ctx: &mut Context) -> Result<Vec<JqValue>, InterpreterError> {
+    pub fn run(
+        &self,
+        expr: &Expr,
+        input: &JqValue,
+        ctx: &mut Context,
+    ) -> Result<Vec<JqValue>, InterpreterError> {
         match expr {
             Expr::Identity => Ok(vec![input.clone()]),
 
@@ -145,28 +150,27 @@ impl Interpreter {
                 }
             }
 
-            Expr::TryCatch(body, catch) => {
-                match self.run(body, input, ctx) {
-                    Ok(results) => Ok(results),
-                    Err(_) => {
-                        if let Some(catch_expr) = catch {
-                            self.run(catch_expr, input, ctx)
-                        } else {
-                            Ok(vec![])
-                        }
+            Expr::TryCatch(body, catch) => match self.run(body, input, ctx) {
+                Ok(results) => Ok(results),
+                Err(_) => {
+                    if let Some(catch_expr) = catch {
+                        self.run(catch_expr, input, ctx)
+                    } else {
+                        Ok(vec![])
                     }
                 }
-            }
+            },
 
-            Expr::FunctionCall(name, args) => {
-                self.call_function(name, args, input, ctx)
-            }
+            Expr::FunctionCall(name, args) => self.call_function(name, args, input, ctx),
 
             Expr::Variable(name) => {
                 if let Some(val) = ctx.get_var(name) {
                     Ok(vec![val])
                 } else {
-                    Err(InterpreterError::new(format!("Undefined variable: ${}", name)))
+                    Err(InterpreterError::new(format!(
+                        "Undefined variable: ${}",
+                        name
+                    )))
                 }
             }
 
@@ -224,10 +228,7 @@ impl Interpreter {
                     let key = value_to_sort_key(&key_val);
                     groups.entry(key).or_default().push(item);
                 }
-                let result: Vec<JqValue> = groups
-                    .into_values()
-                    .map(|vals| JqValue::Array(vals))
-                    .collect();
+                let result: Vec<JqValue> = groups.into_values().map(JqValue::Array).collect();
                 Ok(vec![JqValue::Array(result)])
             }
 
@@ -259,7 +260,7 @@ impl Interpreter {
                         best = Some((sk, item));
                     }
                 }
-                Ok(vec![best.unwrap().1])
+                Ok(vec![best.map(|(_, v)| v).unwrap_or(JqValue::Null)])
             }
 
             Expr::MaxBy(expr) => {
@@ -275,7 +276,7 @@ impl Interpreter {
                         best = Some((sk, item));
                     }
                 }
-                Ok(vec![best.unwrap().1])
+                Ok(vec![best.map(|(_, v)| v).unwrap_or(JqValue::Null)])
             }
 
             Expr::UnaryMinus(inner) => {
@@ -298,7 +299,12 @@ impl Interpreter {
         }
     }
 
-    fn eval_to_single(&self, expr: &Expr, input: &JqValue, ctx: &mut Context) -> Result<JqValue, InterpreterError> {
+    fn eval_to_single(
+        &self,
+        expr: &Expr,
+        input: &JqValue,
+        ctx: &mut Context,
+    ) -> Result<JqValue, InterpreterError> {
         let results = self.run(expr, input, ctx)?;
         if results.len() == 1 {
             Ok(results[0].clone())
@@ -311,11 +317,18 @@ impl Interpreter {
         }
     }
 
-    fn eval_binary_op(&self, op: &BinaryOp, left: &JqValue, right: &JqValue) -> Result<JqValue, InterpreterError> {
+    fn eval_binary_op(
+        &self,
+        op: &BinaryOp,
+        left: &JqValue,
+        right: &JqValue,
+    ) -> Result<JqValue, InterpreterError> {
         match op {
             BinaryOp::Add => match (left, right) {
                 (JqValue::Number(a), JqValue::Number(b)) => Ok(JqValue::Number(a + b)),
-                (JqValue::String(a), JqValue::String(b)) => Ok(JqValue::String(format!("{}{}", a, b))),
+                (JqValue::String(a), JqValue::String(b)) => {
+                    Ok(JqValue::String(format!("{}{}", a, b)))
+                }
                 (JqValue::Array(a), JqValue::Array(b)) => {
                     let mut result = a.clone();
                     result.extend(b.clone());
@@ -338,7 +351,8 @@ impl Interpreter {
                 (JqValue::Number(a), JqValue::Number(b)) => Ok(JqValue::Number(a - b)),
                 (JqValue::Array(a), JqValue::Array(b)) => {
                     let b_set: Vec<&JqValue> = b.iter().collect();
-                    let result: Vec<JqValue> = a.iter().filter(|x| !b_set.contains(x)).cloned().collect();
+                    let result: Vec<JqValue> =
+                        a.iter().filter(|x| !b_set.contains(x)).cloned().collect();
                     Ok(JqValue::Array(result))
                 }
                 _ => Err(InterpreterError::new(format!(
@@ -434,7 +448,13 @@ impl Interpreter {
         }
     }
 
-    fn call_function(&self, name: &str, args: &[Expr], input: &JqValue, ctx: &mut Context) -> Result<Vec<JqValue>, InterpreterError> {
+    fn call_function(
+        &self,
+        name: &str,
+        args: &[Expr],
+        input: &JqValue,
+        ctx: &mut Context,
+    ) -> Result<Vec<JqValue>, InterpreterError> {
         match name {
             "length" => {
                 if !args.is_empty() {
@@ -484,7 +504,7 @@ impl Interpreter {
                     return Err(InterpreterError::new("sort takes no arguments"));
                 }
                 let mut items = input.iterate();
-                items.sort_by(|a, b| value_to_sort_key(a).cmp(&value_to_sort_key(b)));
+                items.sort_by_key(value_to_sort_key);
                 Ok(vec![JqValue::Array(items)])
             }
             "unique" => {
@@ -512,9 +532,8 @@ impl Interpreter {
                 }
                 let min = items
                     .into_iter()
-                    .min_by(|a, b| value_to_sort_key(a).cmp(&value_to_sort_key(b)))
-                    .unwrap();
-                Ok(vec![min])
+                    .min_by(|a, b| value_to_sort_key(a).cmp(&value_to_sort_key(b)));
+                Ok(vec![min.unwrap_or(JqValue::Null)])
             }
             "max" => {
                 if !args.is_empty() {
@@ -526,9 +545,8 @@ impl Interpreter {
                 }
                 let max = items
                     .into_iter()
-                    .max_by(|a, b| value_to_sort_key(a).cmp(&value_to_sort_key(b)))
-                    .unwrap();
-                Ok(vec![max])
+                    .max_by(|a, b| value_to_sort_key(a).cmp(&value_to_sort_key(b)));
+                Ok(vec![max.unwrap_or(JqValue::Null)])
             }
             "add" => {
                 if !args.is_empty() {
@@ -571,7 +589,9 @@ impl Interpreter {
                 }
                 let prefix = self.eval_to_single(&args[0], input, ctx)?;
                 match (input, prefix) {
-                    (JqValue::String(s), JqValue::String(p)) => Ok(vec![JqValue::Bool(s.starts_with(&*p))]),
+                    (JqValue::String(s), JqValue::String(p)) => {
+                        Ok(vec![JqValue::Bool(s.starts_with(&*p))])
+                    }
                     _ => Ok(vec![JqValue::Bool(false)]),
                 }
             }
@@ -581,7 +601,9 @@ impl Interpreter {
                 }
                 let suffix = self.eval_to_single(&args[0], input, ctx)?;
                 match (input, suffix) {
-                    (JqValue::String(s), JqValue::String(suf)) => Ok(vec![JqValue::Bool(s.ends_with(&*suf))]),
+                    (JqValue::String(s), JqValue::String(suf)) => {
+                        Ok(vec![JqValue::Bool(s.ends_with(&*suf))])
+                    }
                     _ => Ok(vec![JqValue::Bool(false)]),
                 }
             }
@@ -592,7 +614,10 @@ impl Interpreter {
                 let sep = self.eval_to_single(&args[0], input, ctx)?;
                 match (input, sep) {
                     (JqValue::String(s), JqValue::String(sep)) => {
-                        let parts: Vec<JqValue> = s.split(&*sep).map(|p| JqValue::String(p.to_string())).collect();
+                        let parts: Vec<JqValue> = s
+                            .split(&*sep)
+                            .map(|p| JqValue::String(p.to_string()))
+                            .collect();
                         Ok(vec![JqValue::Array(parts)])
                     }
                     _ => Err(InterpreterError::new("split requires string arguments")),
@@ -608,16 +633,21 @@ impl Interpreter {
                     _ => return Err(InterpreterError::new("join requires string separator")),
                 };
                 let items = input.iterate();
-                let parts: Vec<String> = items.iter().map(|v| match v {
-                    JqValue::String(s) => s.clone(),
-                    other => other.to_string(),
-                }).collect();
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|v| match v {
+                        JqValue::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .collect();
                 Ok(vec![JqValue::String(parts.join(&sep_str))])
             }
             "flatten" => {
-                let depth = if args.len() >= 1 {
-                    self.eval_to_single(&args[0], input, ctx)?
-                        .length() as i32
+                let depth = if !args.is_empty() {
+                    match self.eval_to_single(&args[0], input, ctx)? {
+                        JqValue::Number(n) => n as i32,
+                        other => other.length() as i32,
+                    }
                 } else {
                     i32::MAX
                 };
@@ -645,7 +675,7 @@ impl Interpreter {
                 Ok(if items.is_empty() {
                     vec![JqValue::Null]
                 } else {
-                    vec![items.last().unwrap().clone()]
+                    vec![items[items.len() - 1].clone()]
                 })
             }
             "nth" => {
@@ -654,7 +684,10 @@ impl Interpreter {
                 }
                 let n = self.eval_to_single(&args[0], input, ctx)?;
                 let items = input.iterate();
-                let idx = n.length() as usize;
+                let idx = match n {
+                    JqValue::Number(num) => num as usize,
+                    other => other.length() as usize,
+                };
                 Ok(if idx < items.len() {
                     vec![items[idx].clone()]
                 } else {
@@ -771,7 +804,7 @@ impl Interpreter {
                 }
                 let cond = &args[0];
                 let all_true = input.iterate().iter().all(|item| {
-                    self.eval_to_single(cond, &item, ctx)
+                    self.eval_to_single(cond, item, ctx)
                         .map(|v| v.is_truthy())
                         .unwrap_or(false)
                 });
@@ -784,7 +817,7 @@ impl Interpreter {
                 }
                 let cond = &args[0];
                 let any_true = input.iterate().iter().any(|item| {
-                    self.eval_to_single(cond, &item, ctx)
+                    self.eval_to_single(cond, item, ctx)
                         .map(|v| v.is_truthy())
                         .unwrap_or(false)
                 });
@@ -815,8 +848,8 @@ fn value_to_sort_key(v: &JqValue) -> String {
         }
         JqValue::Number(n) => format!("{:+e}", n),
         JqValue::String(s) => format!("s{}", s),
-        JqValue::Array(_) => format!("a{}", v.to_string()),
-        JqValue::Object(_) => format!("o{}", v.to_string()),
+        JqValue::Array(_) => format!("a{v}"),
+        JqValue::Object(_) => format!("o{v}"),
     }
 }
 

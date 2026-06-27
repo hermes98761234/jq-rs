@@ -199,11 +199,9 @@ impl From<serde_json::Value> for JqValue {
             serde_json::Value::Array(arr) => {
                 JqValue::Array(arr.into_iter().map(JqValue::from).collect())
             }
-            serde_json::Value::Object(o) => JqValue::Object(
-                o.into_iter()
-                    .map(|(k, v)| (k, JqValue::from(v)))
-                    .collect(),
-            ),
+            serde_json::Value::Object(o) => {
+                JqValue::Object(o.into_iter().map(|(k, v)| (k, JqValue::from(v))).collect())
+            }
         }
     }
 }

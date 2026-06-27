@@ -1,52 +1,61 @@
-/// jq filter language parser.
-///
-/// Grammar (simplified):
-///   filter       := pipe
-///   pipe         := compound ('|' compound)*
-///   compound     := atom ('.' accessor | '[' expr ']' | '(' args ')')*
-///   accessor     := IDENT | STRING
-///   atom         := '.' | STRING | NUMBER | 'null' | 'true' | 'false'
-///                  | '[' filter? ']' | '{' obj_expr '}'
-///                  | IDENT '(' args ')' | '(' filter ')' | 'if' filter 'then' filter ('else' filter)? 'end'
-///                  | 'try' filter ('catch' filter)?
-///                  | 'reduce' filter 'as' IDENT '(' filter ';' filter ')'
-///                  | 'map' '(' filter ')'
-///                  | 'select' '(' filter ')'
-///   obj_expr     := (STRING ':' filter (',' STRING ':' filter)*)
-///   args         := filter (',' filter)*
-
+// jq filter language parser.
+//
+// Grammar (simplified):
+//   filter       := pipe
+//   pipe         := compound ('|' compound)*
+//   compound     := atom ('.' accessor | '[' expr ']' | '(' args ')')*
+//   accessor     := IDENT | STRING
+//   atom         := '.' | STRING | NUMBER | 'null' | 'true' | 'false'
+//                  | '[' filter? ']' | '{' obj_expr '}'
+//                  | IDENT '(' args ')' | '(' filter ')' | 'if' filter 'then' filter ('else' filter)? 'end'
+//                  | 'try' filter ('catch' filter)?
+//                  | 'reduce' filter 'as' IDENT '(' filter ';' filter ')'
+//                  | 'map' '(' filter ')'
+//                  | 'select' '(' filter ')'
+//   obj_expr     := (STRING ':' filter (',' STRING ':' filter)*)
+//   args         := filter (',' filter)*
 use crate::value::JqValue;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Identity,                                    // .
-    FieldAccess(String),                         // .field
-    IndexAccess(Box<Expr>),                      // .[expr]
-    Literal(JqValue),                            // "string", 42, null, true, false
-    Pipe(Box<Expr>, Box<Expr>),                  // e1 | e2
-    ArrayLiteral(Vec<Expr>),                     // [e1, e2, ...]
-    ObjectLiteral(Vec<(Expr, Expr)>),            // {k: v, ...}
+    Identity,                                            // .
+    FieldAccess(String),                                 // .field
+    IndexAccess(Box<Expr>),                              // .[expr]
+    Literal(JqValue),                                    // "string", 42, null, true, false
+    Pipe(Box<Expr>, Box<Expr>),                          // e1 | e2
+    ArrayLiteral(Vec<Expr>),                             // [e1, e2, ...]
+    ObjectLiteral(Vec<(Expr, Expr)>),                    // {k: v, ...}
     IfThenElse(Box<Expr>, Box<Expr>, Option<Box<Expr>>), // if e1 then e2 [else e3] end
-    TryCatch(Box<Expr>, Option<Box<Expr>>),      // try e1 [catch e2]
-    FunctionCall(String, Vec<Expr>),             // func(args)
-    Variable(String),                            // $var
-    Iterate,                                     // .[]
-    Select(Box<Expr>),                           // select(expr)
-    Map(Box<Expr>),                              // map(expr)
-    Reduce(Box<Expr>, String, Box<Expr>, Box<Expr>), // reduce expr as $var (init; update)
-    GroupBy(Box<Expr>),                          // group_by(expr)
-    SortBy(Box<Expr>),                           // sort_by(expr)
-    MinBy(Box<Expr>),                            // min_by(expr)
-    MaxBy(Box<Expr>),                            // max_by(expr)
-    UnaryMinus(Box<Expr>),                       // -expr
-    BinaryOp(BinaryOp, Box<Expr>, Box<Expr>),    // e1 op e2
+    TryCatch(Box<Expr>, Option<Box<Expr>>),              // try e1 [catch e2]
+    FunctionCall(String, Vec<Expr>),                     // func(args)
+    Variable(String),                                    // $var
+    Iterate,                                             // .[]
+    Select(Box<Expr>),                                   // select(expr)
+    Map(Box<Expr>),                                      // map(expr)
+    Reduce(Box<Expr>, String, Box<Expr>, Box<Expr>),     // reduce expr as $var (init; update)
+    GroupBy(Box<Expr>),                                  // group_by(expr)
+    SortBy(Box<Expr>),                                   // sort_by(expr)
+    MinBy(Box<Expr>),                                    // min_by(expr)
+    MaxBy(Box<Expr>),                                    // max_by(expr)
+    UnaryMinus(Box<Expr>),                               // -expr
+    BinaryOp(BinaryOp, Box<Expr>, Box<Expr>),            // e1 op e2
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinaryOp {
-    Add, Sub, Mul, Div, Mod,
-    Eq, Neq, Lt, Lte, Gt, Gte,
-    And, Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    And,
+    Or,
 }
 
 #[derive(Debug)]
@@ -81,7 +90,11 @@ impl Parser {
         self.skip_whitespace();
         if self.pos < self.input.len() {
             return Err(ParseError {
-                message: format!("Unexpected character at position {}: '{}'", self.pos, self.char_at(self.pos)),
+                message: format!(
+                    "Unexpected character at position {}: '{}'",
+                    self.pos,
+                    self.char_at(self.pos)
+                ),
                 pos: self.pos,
             });
         }
@@ -368,7 +381,7 @@ impl Parser {
                     Ok(Expr::Identity)
                 }
             }
-            '"' | '\'' => {
+            '"' => {
                 let s = self.parse_string()?;
                 Ok(Expr::Literal(JqValue::String(s)))
             }
@@ -380,7 +393,9 @@ impl Parser {
                 self.expect(')')?;
                 Ok(expr)
             }
-            '-' if self.pos + 1 < self.input.len() && self.char_at(self.pos + 1).is_ascii_digit() => {
+            '-' if self.pos + 1 < self.input.len()
+                && self.char_at(self.pos + 1).is_ascii_digit() =>
+            {
                 self.pos += 1;
                 let n = self.parse_number(false)?;
                 Ok(Expr::Literal(JqValue::Number(n)))
@@ -419,7 +434,11 @@ impl Parser {
                         };
                         self.skip_whitespace();
                         self.expect_word("end")?;
-                        Ok(Expr::IfThenElse(Box::new(cond), Box::new(then_branch), else_branch))
+                        Ok(Expr::IfThenElse(
+                            Box::new(cond),
+                            Box::new(then_branch),
+                            else_branch,
+                        ))
                     }
                     "try" => {
                         let body = self.parse_pipe()?;
@@ -448,7 +467,12 @@ impl Parser {
                         self.expect(';')?;
                         let update = self.parse_pipe()?;
                         self.expect(')')?;
-                        Ok(Expr::Reduce(Box::new(expr), var, Box::new(init), Box::new(update)))
+                        Ok(Expr::Reduce(
+                            Box::new(expr),
+                            var,
+                            Box::new(init),
+                            Box::new(update),
+                        ))
                     }
                     "map" => {
                         self.expect('(')?;
@@ -532,7 +556,7 @@ impl Parser {
     fn parse_object_key_expr(&mut self) -> Result<Expr, ParseError> {
         self.skip_whitespace();
         let ch = self.char_at(self.pos);
-        if ch == '"' || ch == '\'' {
+        if ch == '"' {
             let s = self.parse_string()?;
             Ok(Expr::Literal(JqValue::String(s)))
         } else if is_ident_start(ch) {
@@ -618,9 +642,13 @@ impl Parser {
                 self.pos += 1;
             }
         }
-        if self.pos < self.input.len() && (self.char_at(self.pos) == 'e' || self.char_at(self.pos) == 'E') {
+        if self.pos < self.input.len()
+            && (self.char_at(self.pos) == 'e' || self.char_at(self.pos) == 'E')
+        {
             self.pos += 1;
-            if self.pos < self.input.len() && (self.char_at(self.pos) == '+' || self.char_at(self.pos) == '-') {
+            if self.pos < self.input.len()
+                && (self.char_at(self.pos) == '+' || self.char_at(self.pos) == '-')
+            {
                 self.pos += 1;
             }
             while self.pos < self.input.len() && self.char_at(self.pos).is_ascii_digit() {
@@ -683,7 +711,11 @@ impl Parser {
     fn expect_word(&mut self, word: &str) -> Result<(), ParseError> {
         self.skip_whitespace();
         let after = self.pos + word.len();
-        if self.input[self.pos..].starts_with(word) {
+        if self
+            .input
+            .get(self.pos..)
+            .is_some_and(|s| s.starts_with(word))
+        {
             self.pos = after;
             Ok(())
         } else {
@@ -697,13 +729,17 @@ impl Parser {
     fn match_word(&mut self, word: &str) -> bool {
         self.skip_whitespace();
         let after = self.pos + word.len();
-        if self.input[self.pos..].starts_with(word) {
-            if after >= self.input.len() || !is_ident_part(self.char_at(after)) {
-                self.pos = after;
-                return true;
-            }
+        if self
+            .input
+            .get(self.pos..)
+            .is_some_and(|s| s.starts_with(word))
+            && (after >= self.input.len() || !is_ident_part(self.char_at(after)))
+        {
+            self.pos = after;
+            true
+        } else {
+            false
         }
-        false
     }
 }
 
@@ -747,7 +783,10 @@ mod tests {
     #[test]
     fn test_parse_string() {
         let mut p = Parser::new("\"hello\"");
-        assert_eq!(p.parse().unwrap(), Expr::Literal(JqValue::String("hello".to_string())));
+        assert_eq!(
+            p.parse().unwrap(),
+            Expr::Literal(JqValue::String("hello".to_string()))
+        );
     }
 
     #[test]

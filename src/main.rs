@@ -4,7 +4,7 @@ mod value;
 
 use anyhow::{anyhow, Context as AnyhowContext};
 use clap::{Arg, Command};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use interpreter::{Context, Interpreter};
 use parser::Parser;
@@ -72,6 +72,12 @@ fn main() -> anyhow::Result<()> {
                 .num_args(0..)
                 .last(true),
         )
+        .arg(
+            Arg::new("stream")
+                .long("stream")
+                .action(clap::ArgAction::SetTrue)
+                .help("Output streaming path/value events instead of filter results"),
+        )
         .get_matches();
 
     let compact = matches.get_flag("compact");
@@ -81,6 +87,7 @@ fn main() -> anyhow::Result<()> {
     let monochrome = matches.get_flag("monochrome");
     use std::io::IsTerminal;
     let colored = std::io::stdout().is_terminal() && !monochrome;
+    let stream_mode = matches.get_flag("stream");
 
     // Parse the filter expression
     let filter_str = if let Some(filter) = matches.get_one::<String>("filter") {
@@ -109,18 +116,18 @@ fn main() -> anyhow::Result<()> {
 
     let mut raw_inputs: Vec<(Option<String>, JqValue)> = Vec::new();
     if file_paths.is_empty() {
-        let mut text = String::new();
-        io::stdin()
-            .read_to_string(&mut text)
-            .with_context(|| "Failed to read from stdin")?;
-        for v in parse_json_stream(text.trim()) {
+        let reader = io::BufReader::new(io::stdin());
+        let vals = parse_json_from_reader(reader);
+        for v in vals {
             raw_inputs.push((None, v));
         }
     } else {
         for path in &file_paths {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read file: {}", path))?;
-            for v in parse_json_stream(text.trim()) {
+            let file = std::fs::File::open(path)
+                .with_context(|| format!("Failed to open file: {}", path))?;
+            let reader = io::BufReader::new(file);
+            let vals = parse_json_from_reader(reader);
+            for v in vals {
                 raw_inputs.push((Some(path.clone()), v));
             }
         }
@@ -153,12 +160,20 @@ fn main() -> anyhow::Result<()> {
             all_inputs[i + 1..].iter().map(|(_, v)| v.clone()).collect()
         };
 
-        let results = interpreter
-            .run(&expr, input, &mut ctx)
-            .map_err(|e| anyhow!("{}", e))?;
-        for result in results {
-            let output_str = format_output(result, compact, raw_output, colored);
-            outputs.push(output_str);
+        if stream_mode {
+            let events = stream_value(&[], input);
+            for event in events {
+                let output_str = format_output(event, compact, raw_output, false);
+                outputs.push(output_str);
+            }
+        } else {
+            let results = interpreter
+                .run(&expr, input, &mut ctx)
+                .map_err(|e| anyhow!("{}", e))?;
+            for result in results {
+                let output_str = format_output(result, compact, raw_output, colored);
+                outputs.push(output_str);
+            }
         }
     }
 
@@ -178,116 +193,52 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_json_stream(text: &str) -> Vec<JqValue> {
-    let mut values = Vec::new();
-    let trimmed = text.trim();
-
-    // Try parsing as a standard JSON value first
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        return vec![JqValue::from(v)];
-    }
-
-    // If that fails, try to parse multiple JSON values (stream)
-    let mut offset = 0;
-    while offset < trimmed.len() {
-        let substr = &trimmed[offset..];
-        let substr_trimmed = substr.trim_start();
-        if substr_trimmed.is_empty() {
-            break;
-        }
-        // Try incremental parsing using serde_json
-        match try_parse_json_prefix(substr_trimmed) {
-            Some(v) => {
-                values.push(JqValue::from(v));
-                let consumed =
-                    substr.len() - substr_trimmed.len() + json_consumed_length(substr_trimmed);
-                offset += consumed;
-            }
-            None => break,
-        }
-    }
-
-    if values.is_empty() {
-        // Fallback: just try the full string
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            values.push(JqValue::from(v));
-        }
-    }
-
-    values
+fn parse_json_from_reader<R: std::io::Read>(reader: R) -> Vec<JqValue> {
+    serde_json::Deserializer::from_reader(reader)
+        .into_iter::<serde_json::Value>()
+        .filter_map(|r| r.ok())
+        .map(JqValue::from)
+        .collect()
 }
 
-fn try_parse_json_prefix(s: &str) -> Option<serde_json::Value> {
-    // Use a deserializer approach: try to parse and track position
-    let mut deserializer = serde_json::Deserializer::from_str(s);
-    let result: Result<serde_json::Value, _> = serde::Deserialize::deserialize(&mut deserializer);
-    result.ok()
-}
-
-fn json_consumed_length(s: &str) -> usize {
-    // Determine how many bytes of the string were consumed by the first JSON value.
-    // Handles all JSON token types: objects, arrays, strings, numbers, bools, null.
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, c) in s.char_indices() {
-        if escape {
-            escape = false;
-            continue;
+pub fn stream_value(path: &[JqValue], val: &JqValue) -> Vec<JqValue> {
+    let mut events = Vec::new();
+    match val {
+        JqValue::Array(arr) => {
+            for (i, item) in arr.iter().enumerate() {
+                let mut child_path = path.to_vec();
+                child_path.push(JqValue::Number(i as f64));
+                events.extend(stream_value(&child_path, item));
+            }
+            // truncated marker
+            let mut trunc = std::collections::BTreeMap::new();
+            trunc.insert("truncated".to_string(), JqValue::Bool(true));
+            events.push(JqValue::Array(vec![
+                JqValue::Array(path.to_vec()),
+                JqValue::Object(trunc),
+            ]));
         }
-        if in_string {
-            match c {
-                '\\' => escape = true,
-                '"' => in_string = false,
-                _ => {}
+        JqValue::Object(map) => {
+            for (k, v) in map {
+                let mut child_path = path.to_vec();
+                child_path.push(JqValue::String(k.clone()));
+                events.extend(stream_value(&child_path, v));
             }
-        } else {
-            match c {
-                '{' | '[' => depth += 1,
-                '}' | ']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return i + 1;
-                    }
-                }
-                '"' => in_string = true,
-                't' | 'f' | 'n' if depth == 0 => {
-                    // At top level: could be true, false, or null
-                    let rest = &s[i..];
-                    if rest.starts_with("true") {
-                        return i + 4;
-                    } else if rest.starts_with("false") {
-                        return i + 5;
-                    } else if rest.starts_with("null") {
-                        return i + 4;
-                    }
-                }
-                c if (c.is_ascii_digit() || c == '-') && depth == 0 => {
-                    // A number at top level — scan through the full number literal
-                    let mut end = i + 1;
-                    let bytes = s.as_bytes();
-                    while end < bytes.len() {
-                        let b = bytes[end];
-                        if b.is_ascii_digit()
-                            || b == b'.'
-                            || b == b'e'
-                            || b == b'E'
-                            || b == b'+'
-                            || b == b'-'
-                        {
-                            end += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    return end;
-                }
-                _ => {}
-            }
+            let mut trunc = std::collections::BTreeMap::new();
+            trunc.insert("truncated".to_string(), JqValue::Bool(true));
+            events.push(JqValue::Array(vec![
+                JqValue::Array(path.to_vec()),
+                JqValue::Object(trunc),
+            ]));
+        }
+        _ => {
+            events.push(JqValue::Array(vec![
+                JqValue::Array(path.to_vec()),
+                val.clone(),
+            ]));
         }
     }
-    // Fallback: return the full string length
-    s.len()
+    events
 }
 
 #[cfg(test)]
@@ -315,6 +266,30 @@ mod tests {
         let val = JqValue::Number(42.0);
         let out = format_output(val, false, false, true);
         assert!(out.contains("42"), "Expected number in output");
+    }
+
+    #[test]
+    fn test_stream_value_scalar() {
+        let val = JqValue::Number(42.0);
+        let events = stream_value(&[], &val);
+        assert_eq!(events.len(), 1);
+        // [[], 42]
+        if let JqValue::Array(pair) = &events[0] {
+            assert_eq!(&pair[0], &JqValue::Array(vec![]));
+            assert_eq!(&pair[1], &JqValue::Number(42.0));
+        } else {
+            panic!("Expected array pair");
+        }
+    }
+
+    #[test]
+    fn test_stream_value_object() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("a".to_string(), JqValue::Number(1.0));
+        let val = JqValue::Object(map);
+        let events = stream_value(&[], &val);
+        // [[["a"],1], [["a"],{"truncated":true}]]
+        assert!(events.len() >= 2, "Expected at least 2 events for object");
     }
 }
 

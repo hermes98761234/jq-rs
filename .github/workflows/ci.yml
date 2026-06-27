@@ -43,9 +43,22 @@ jobs:
         run: cargo test --verbose
 
   build:
-    name: Build
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.os }})
     needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: jq-rs
+            artifact_upload_name: jq-rs-linux-x86_64
+          - os: macos-latest
+            artifact_name: jq-rs
+            artifact_upload_name: jq-rs-macos-aarch64
+          - os: windows-latest
+            artifact_name: jq-rs.exe
+            artifact_upload_name: jq-rs-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -69,8 +82,8 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jq-rs-linux-x86_64
-          path: target/release/jq-rs
+          name: ${{ matrix.artifact_upload_name }}
+          path: target/release/${{ matrix.artifact_name }}
 
   release:
     name: Release
@@ -82,26 +95,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo dependencies
-        uses: actions/cache@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          path: artifacts
 
-      - name: Build release
-        run: cargo build --release --verbose
+      - name: List artifacts
+        run: ls -R artifacts
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/jq-rs
+          files: |
+            artifacts/jq-rs-linux-x86_64/jq-rs
+            artifacts/jq-rs-macos-aarch64/jq-rs
+            artifacts/jq-rs-windows-x86_64.exe/jq-rs.exe
           generate_release_notes: true
           fail_on_unmatched_files: true

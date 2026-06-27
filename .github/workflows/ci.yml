@@ -43,27 +43,49 @@ jobs:
         run: cargo test --verbose
 
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     needs: test
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            artifact_name: jq-rs
-            artifact_upload_name: jq-rs-linux-x86_64
-          - os: macos-latest
-            artifact_name: jq-rs
-            artifact_upload_name: jq-rs-macos-aarch64
-          - os: windows-latest
-            artifact_name: jq-rs.exe
-            artifact_upload_name: jq-rs-windows-x86_64.exe
-    runs-on: ${{ matrix.os }}
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: x86_64-unknown-linux-gnu
+          # Linux x86_64 musl
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            suffix: x86_64-unknown-linux-musl
+          # Linux aarch64 gnu
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: aarch64-unknown-linux-gnu
+          # Linux aarch64 musl
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            suffix: aarch64-unknown-linux-musl
+          # macOS x86_64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            suffix: x86_64-apple-darwin
+          # macOS aarch64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-14
+            suffix: aarch64-apple-darwin
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            suffix: x86_64-pc-windows-msvc
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo dependencies
         uses: actions/cache@v4
@@ -72,18 +94,54 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Install cross-compilation tools (aarch64-linux-gnu)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install cross-compilation tools (x86_64-linux-musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install cross-compilation tools (aarch64-linux-musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
 
       - name: Build release
-        run: cargo build --release --verbose
+        run: cargo build --release --target ${{ matrix.target }} --verbose
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_musl: aarch64-linux-gnu-g++
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Prepare binary
+        shell: bash
+        run: |
+          BINARY="jq-rs"
+          EXT=""
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            EXT=".exe"
+          fi
+          mkdir -p release
+          cp target/${{ matrix.target }}/release/$BINARY$EXT release/jq-rs-${{ matrix.suffix }}$EXT
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_upload_name }}
-          path: target/release/${{ matrix.artifact_name }}
+          name: jq-rs-${{ matrix.suffix }}
+          path: release/*
 
   release:
     name: Release
@@ -98,22 +156,24 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
-
-      - name: List artifacts
-        run: ls -R artifacts
+          path: artifacts/
+          pattern: jq-rs-*
 
       - name: Prepare release assets
+        shell: bash
         run: |
           mkdir -p release
-          cp artifacts/jq-rs-linux-x86_64/jq-rs release/jq-rs-linux-x86_64
-          cp artifacts/jq-rs-macos-aarch64/jq-rs release/jq-rs-macos-aarch64
-          cp artifacts/jq-rs-windows-x86_64.exe/jq-rs.exe release/jq-rs-windows-x86_64.exe
+          for dir in artifacts/jq-rs-*/; do
+            BIN=$(ls "$dir" | head -1)
+            cp "$dir/$BIN" "release/$BIN"
+          done
+          cd release
+          sha256sum jq-rs-* > SHA256SUMS.txt
+          ls -la
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            release/*
+          files: release/*
           generate_release_notes: true
           fail_on_unmatched_files: true
